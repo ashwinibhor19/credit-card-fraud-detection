@@ -1,0 +1,522 @@
+---
+title: "Project : Credit card Fraud Detection"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+#Loading Libraries
+```{r Libraries}
+
+checkAndInstallPackages <- function (packages)  {   
+  
+   # Iteration to check if package is installed
+   for(package in packages){
+
+       # If package is installed then load it
+       if(package %in% rownames(installed.packages()))
+          do.call('library', list(package))
+
+       # If package is not installed then download it and load
+       else {
+          install.packages(package)
+          do.call("library", list(package))
+       }
+   } 
+}
+
+# List of packages needed for the project
+packages <- c("ggplot2", 
+              "dplyr",
+              "corrplot",
+              "rpart", 
+              "caret",
+              "pROC",
+              "rpart.plot",
+              "randomForest",
+              "DMwR",
+              "AUC",
+              "ggfortify",
+              "class",
+              "rfUtilities")
+checkAndInstallPackages(packages)
+```
+
+
+
+#Data Acquisition
+Download the dataset from https://www.kaggle.com/mlg-ulb/creditcardfraud and import into R studio.
+```{r Data_Import}
+
+creditcard.raw <- read.csv("creditcard.csv", header = T)
+creditcard <- as.data.frame(creditcard.raw)
+head(creditcard)
+
+#Structure of dataset. Transforming Class variable to factor
+str(creditcard)
+creditcard$Class <- as.factor(creditcard$Class)
+```
+
+
+
+#Data Exploration
+##Exploratory Data Plots
+All variables are numeric except Class variable. Time and Amount are actual variables, whereas V1 - V28 are  pricipal components of actual data as raw data can't be publicly available due to privacy and confidentiality.
+####Overview of dataset
+```{r Data_Explore}
+summary(creditcard)
+```
+
+####Check for missing values
+```{r}
+sum(is.na(creditcard))
+```
+
+There are no missing values in the dataset.
+
+
+#### Class variable
+```{r}
+# Distribution of Class variables. 
+table(creditcard$Class)
+#Percentage of Class variable distribution
+prop.table(table(creditcard$Class))*100
+
+#Histogram of Class variable
+ggplot(creditcard, aes(x = Class, fill = Class)) +
+  geom_bar(alpha = 0.4) +
+  ggtitle("Histogram of Class variable") +
+  scale_fill_manual(values = c("blue","red")) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+Positive class (fraudulent trasaction) accounts for 0.172% of the total transactions. Hence the data is higly skewed i.e. Imbalanced. Even a "null" classifier which always predicts class=0 would obtain over 99% accuracy on this task. Hence, measure of mean accuracy can't be used due to chance of missclssification.
+
+```{r}
+#Density plot for Class variable
+ggplot() + 
+  geom_density(data = creditcard[creditcard$Class == 0,],
+               aes(x=Time),
+               color = "blue",
+               fill = "blue",
+               alpha = 0.12) +
+  geom_density(data = creditcard[creditcard$Class == 1,],
+               aes(x=Time),
+               color = "red",
+               fill = "red",
+               alpha = 0.12) + 
+  ggtitle("Time vs Class Density") + 
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+#### AMOUNT VARIABLE
+```{r}
+summary(creditcard$Amount)
+```
+
+From mean and maximum value of Amount, there is heavy skew observed in the dataset. Taking logarithmic values to observe the trend. Using (Amount+1) to avoid removal of out to bound values.
+```{r}
+ggplot() + 
+  geom_density(data = creditcard[creditcard$Class == 0,], 
+               aes(x=log(Amount+1)), color = "blue", 
+               fill = "blue", alpha = 0.12) +
+  geom_density(data = creditcard[creditcard$Class == 1,], 
+               aes(x=log(Amount+1)), color = "red", 
+               fill = "red", alpha = 0.12) + 
+  ggtitle("Amount vs Class Density") + 
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+ggplot(creditcard, aes(x = Class, y = Amount)) + 
+  geom_boxplot() + 
+  ggtitle("Distribution of transaction amount by class") + 
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+####TIME VARIABLE
+```{r}
+summary(creditcard$Time)
+
+#Obtaining number of days
+max(creditcard$Time)/(60*60*24)
+
+hist(creditcard$Time, xlab = "Time", main = "Number of transactions VS Time")
+```
+
+Time values are in the form of seconds past after the first transaction. The dataset available is for 2 days. From the frequency plot, there is a periodic variation for legitimate transaction.
+
+```{r}
+#Separating frau and legit class
+Fraud <- creditcard[creditcard$Class==1,]
+Legit <- creditcard[creditcard$Class==0,]
+
+#Assuming, first transaction (Time=0) took place at 12:00 am
+ggplot() + 
+  geom_point(data=Legit, aes(Time,Amount),
+             color="blue",alpha=0.12) 
+ggplot() + 
+  geom_point(data=Fraud, aes(Time,Amount),
+             color="red", alpha=0.12)
+
+``` 
+
+##Detection of Outliers
+```{r Outliers}
+#Outliers
+boxplot(creditcard[,-c(1,31,30)], 
+        col = rainbow(28, alpha = 0.3))
+
+#Detecting outlier percentage
+OutlierPercentage = function(dataframe){
+  num=sapply(dataframe, is.numeric)
+  NumOut = function(x){
+    q1 = quantile(x, 0.25, na.rm = T)
+    q2 = quantile(x, 0.50, na.rm = T)
+    q3 = quantile(x, 0.75, na.rm = T)
+    iqr = q3-q1
+    outlier = x[x > q3 + 1.5*iqr | x < q1 - 1.5*iqr]
+    percentage = (length(outlier) / length(x))*100
+    return(percentage)
+  }
+  data=sapply(dataframe[,num], NumOut)
+   return(as.data.frame(data))
+}
+OutlierPercentage(creditcard)
+```
+
+Removing of outliers depends on the model, in the feature selection stage. Not all models are sensitive to outliers. Hence, we shall deal with them later.
+
+##Correlation/Collinearity Analysis
+```{r}
+#Correlation plot
+corrplot(cor(creditcard.raw[,-c(1)]), 
+         method = "color", type = "lower", 
+         tl.col = "black", tl.cex = 0.7)
+```
+
+As the predictors V1 to V28 are principal components, there is no correlation betwwen them. But few predictors are correlated to the Class and Amount variables.
+
+
+
+#Data Cleaning and Shaping
+##Data Imputaion
+We have a clean data with no missing values. Hence, we will remove a few values and impute them to construct a model.
+```{r}
+set.seed(123)
+credit.Impute <- as.data.frame(creditcard)
+summary(credit.Impute)
+#Introducing missing values randomly
+for(i in 1:29){
+credit.Impute[c(sample(1:nrow(creditcard),20)),i] <- NA
+}
+#Number of missing values
+sum(is.na(credit.Impute))
+```
+
+As the features are normalized to a mean of 0, we can impute the values with median
+```{r}
+for(i in 1:29){
+credit.Impute[c(which(is.na(credit.Impute[,i]))),i] <- median(credit.Impute[,i], na.rm = T)
+}
+
+#Checking missing values
+sum(is.na(credit.Impute))
+
+```
+
+##Normalization of feature values
+Features V1 to V28 are normalised to mean = 0. We also normalize the variable Amount using min-max.
+```{r}
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+credit.Impute$Amount <- normalize(credit.Impute$Amount)
+```
+
+##Dummy code
+As there is no categorical variable in the dataset, it is not possible perform dummy coding.
+
+##PCA
+The variables V1 - V28 are said to be in the form of principal components, thus we can perform PCA on them to verify the same.
+```{r PCA}
+credit.pca <- prcomp(credit.Impute[,-c(1,30,31)], center = T)
+
+#Comparing the variable and its pca values
+abs(head(credit.Impute[,c(2,7,10,25)]))
+abs(head(credit.pca$x[,c(1,6,9,24)]))
+which(round(abs(head(credit.Impute[,c(2,7,10,25)])),
+            digits = 2) != round(abs(head(credit.pca$x[,c(1,6,9,24)])),
+                                 digits = 2))
+```
+
+The variable and their PCA values are equal. Hence, the dataset is already dimensionally reduced.
+
+##Data Sampling
+Due to imbalanced nature of the dataset, the classification algorithms tend to be biased towards the majority class. Hence, we will sample the dataset using SMOTE (up-sample)
+```{r Sampling}
+#Over-sampling the data
+credit.data <- SMOTE(Class~.,credit.Impute, 
+                     perc.over = 900, perc.under = 150)
+table(credit.data$Class)
+
+ggplot(credit.data, aes(x = Class, fill = Class)) + 
+  geom_bar(alpha = 0.4) +
+  ggtitle("Histogram of Class variable") + 
+  scale_fill_manual(values = c("blue","red")) + 
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+Thus, we obtain a balanced subset of the dataset.
+
+
+
+#Model Construction and Evaluation
+##Training and Validation Subsets
+```{r Data_Partitioning}
+#Creating 80-20 split on sampled dataset
+set.seed(123)
+split.index <- sample(seq_len(nrow(credit.data)), 
+                      size = floor(0.8 * nrow(credit.data)))
+credit.train <- credit.data[split.index,]
+credit.test <- credit.data[-split.index,-31]
+#Storing class output differently
+credit.test.target <- as.data.frame(credit.data[-split.index,31])
+colnames(credit.test.target)[1] <- c("Class")
+
+```
+
+#Models
+For this Classification problem, the models used are:
+Decision Tree
+Random Forest
+K Nearest-Neighbour
+
+##Decision Tree
+```{r DT}
+#Building the model
+mod.DT <- rpart(Class ~ .,data = credit.train, method = "class")
+
+##  Evaluation: Holdout method
+mod.DT.Pred <- predict(mod.DT, credit.test)
+credit.test.target$Pred.DT <- as.factor(ifelse(mod.DT.Pred[,2]>0.5,1,0))
+conf.DT <- confusionMatrix(credit.test.target$Pred.DT,
+                           credit.test.target$Class, positive = '1')
+conf.DT
+
+#Plot the tree
+rpart.plot(mod.DT, cex = 0.6, box.palette = "BuRd")
+
+#AUC and ROC
+roc.DT <- pROC::roc(credit.test.target$Class, mod.DT.Pred[,1])
+plot(roc.DT, main = paste0("AUC: ", round(pROC::auc(roc.DT), 3)))
+auc.DT <- round(pROC::auc(roc.DT), 3)
+
+#Model Accuracy
+mod.DT.Acc <- conf.DT$overall[1]*100
+mod.DT.Acc
+
+```
+
+##Random Forest
+```{r RF}
+#Building the model
+mod.RF <- randomForest(Class~., data = credit.train)
+
+##  Evaluation: Holdout method
+mod.RF.Pred <- predict(mod.RF, credit.test)
+credit.test.target$Pred.RF <- as.factor(mod.RF.Pred)
+conf.RF <- confusionMatrix(credit.test.target$Pred.RF,
+                           credit.test.target$Class, positive = '1')
+conf.RF
+
+credit.test.target$Pred.RF <- ordered(credit.test.target$Pred.RF, levels = c("0","1"))
+#AUC and ROC
+roc.RF <- pROC::roc(credit.test.target$Class, credit.test.target$Pred.RF)
+plot(roc.RF, main = paste0("AUC: ", round(pROC::auc(roc.RF), 3)))
+auc.RF <- round(pROC::auc(roc.RF), 3)
+
+#Model Accuracy
+mod.RF.Acc <- conf.RF$overall[1]*100
+mod.RF.Acc
+
+```
+
+
+
+##K Nearest neighbours
+```{r knn}
+#Building the model
+kVal <- round(sqrt(nrow(credit.train)))
+mod.KNN <- knn3(Class~.,data = credit.train)
+
+##  Evaluation: Holdout method
+mod.KNN.Pred <- predict(mod.KNN, credit.test)
+credit.test.target$Pred.KNN <- as.factor(ifelse(mod.KNN.Pred[,2]>0.5,1,0))
+conf.KNN <- confusionMatrix(credit.test.target$Pred.KNN,
+                            credit.test.target$Class, positive = '1')
+conf.KNN
+
+#AUC and ROC
+roc.KNN <- pROC::roc(credit.test.target$Class, mod.KNN.Pred[,1])
+plot(roc.KNN, main = paste0("AUC: ", round(pROC::auc(roc.KNN), 3)))
+auc.KNN <- round(pROC::auc(roc.KNN), 3)
+
+#Model Accuracy
+mod.KNN.Acc <- conf.KNN$overall[1]*100
+mod.KNN.Acc
+
+```
+
+##Tuning of Models and Cross Validation
+```{r tune}
+# Formatting the data
+credit.tr <- credit.train
+levels(credit.tr$Class) <- make.names(levels(credit.tr$Class))
+levels(credit.test.target$Class) <- make.names(levels(credit.test.target$Class))
+
+# Setting up train control
+train.controll <- trainControl(method = "cv", 
+                               number = 5, 
+                               classProbs = T, 
+                               summaryFunction = twoClassSummary)
+
+## Decision tree
+DT.grid <- expand.grid(maxdepth = 3:10)
+#Get the best model
+DT.best.model <- train(Class ~ ., method = "rpart2", 
+                       data = credit.tr, 
+                       tuneGrid = DT.grid, 
+                       trControl = train.controll, 
+                       metric="ROC")
+
+
+## Random Forest
+RF.grid <- expand.grid(mtry=sqrt(ncol(credit.tr)))
+ntrees <- c(10, 50, 100, 150, 200)
+RF.best.model <- data.frame(mtry=c(), ROC=c(), Sens=c(), ROCSD=c(), SensSD=c(), SpecSD=c())
+for(ntree in ntrees) {
+  rf_models <- train(Class ~ ., 
+                     method = "rf", 
+                     data = credit.tr, 
+                     tuneGrid = RF.grid, 
+                     trControl = train.controll, 
+                     metric="ROC", 
+                     ntree = ntree)
+  RF.best.model <- rbind(RF.best.model, as.matrix(rf_models$result))
+}
+row.names(RF.best.model) <- ntrees
+#Get the best ntree
+best.ntree <- as.integer(row.names
+                         (RF.best.model[which.max(RF.best.model$ROC), ]))
+#Get the best model
+RF.best.model <- train(Class ~ ., 
+                       method = "rf", 
+                       data = credit.tr, 
+                       tuneGrid = RF.grid, 
+                       ntree = best.ntree)
+
+
+
+## K Nearest neighbour
+KNN.grid <- expand.grid(k = c(5, 11, 21, 25))
+#Get the best model
+KNN.best.model <- train(Class ~ ., 
+                        method = "knn", 
+                        data = credit.tr, 
+                        tuneGrid = KNN.grid, 
+                        trControl = train.controll, 
+                        metric="ROC")
+
+```
+
+```{r}
+# Testing individual tuned models
+#KNN
+pred_knn_tr <- predict(KNN.best.model, credit.tr[,-length(colnames(credit.train))])
+tune.KNN <- predict(KNN.best.model, credit.test[,-length(colnames(credit.train))])
+conf.tune.KNN <- confusionMatrix(tune.KNN, credit.test.target$Class, positive = "X1")
+conf.tune.KNN
+```
+
+```{r}
+#Random Forest
+pred_rf_tr <- predict(RF.best.model, credit.tr[,-length(colnames(credit.train))])
+tune.RF <- predict(RF.best.model, credit.test[,-length(colnames(credit.train))])
+conf.tune.RF <- confusionMatrix(tune.RF, credit.test.target$Class,positive = "X1")
+conf.tune.RF
+```
+
+```{r}
+#DEcision Tree
+pred_dt_tr <- predict(DT.best.model, credit.tr[,-length(colnames(credit.train))])
+tune.DT <- predict(DT.best.model, credit.test[,-length(colnames(credit.train))])
+conf.tune.DT<- confusionMatrix(tune.DT, credit.test.target$Class,positive = "X1")
+conf.tune.DT
+```
+
+##Comparison of Models
+```{r compare}
+#Comparing the accuracies and AUC for all 3 models
+
+Compare.models <- data.frame(
+  Accuracy = c(mod.DT.Acc,mod.RF.Acc,mod.KNN.Acc),
+  Tuned_Accuracy = c(conf.tune.DT$overall[1] * 100,
+                     conf.tune.RF$overall[1] * 100,
+                     conf.tune.KNN$overall[1] * 100),
+  Area_Under_Curve  = c(auc.DT * 100,auc.RF * 100,
+                        auc.KNN * 100) ,
+  Sensitivity = c(conf.DT$byClass[1] * 100,
+                  conf.RF$byClass[1] * 100,
+                  conf.KNN$byClass[1] * 100)
+  )
+
+rownames(Compare.models) <- 
+  c("Decision Tree","Random Forest","K Nearest Neighbour")
+Compare.models
+```
+
+##Interpretation of Results
+
+The metrics used to evaluate these models are Accuracy and Sensitivity. It can be seen that Random Forest outperforms all the other models with an accuracy of 99% and sensitivity of 98% in the test set. KNN performs poorly because of the significant overlap in feature distributions for the positive and negative classes. Since the features in the dataset are already a result of dimensionality reduction, the models do not have good interpretability.
+
+Model stacking is a widely used approach to further improve model performance.
+A mode stacking approach can be tried to develope a better model.
+
+
+##Stacked Ensemble Model
+```{r warning=FALSE}
+# Model Stacking
+credit_ensemble <- credit.tr
+credit_ensemble$pred_knn <- pred_knn_tr
+credit_ensemble$pred_rf <- pred_rf_tr
+credit_ensemble$pred_dt <- pred_dt_tr
+
+#Training stacked model using Logistic Regression
+stacked_model <- train(Class ~ ., 
+                       data = credit_ensemble, 
+                       method="glm", 
+                       maxit=50)
+
+# Testing Stacked Model
+pred_knn_test <- predict(KNN.best.model, credit.test)
+pred_rf_test <- predict(RF.best.model, credit.test)
+pred_dt_test <- predict(DT.best.model, credit.test)
+credit_ensemble_test <- credit.test
+credit_ensemble_test$pred_knn <- pred_knn_test
+credit_ensemble_test$pred_rf <- pred_rf_test
+credit_ensemble_test$pred_dt <- pred_dt_test
+pr_stacked <- predict(stacked_model, credit_ensemble_test)
+prob_stacked <- predict(stacked_model, 
+                        credit_ensemble_test, type="prob")
+```
+
+```{r}
+roc_stacked <- pROC::roc(credit.test.target$Class, prob_stacked[,1])
+conf.stack <- confusionMatrix(pr_stacked, 
+                              credit.test.target$Class,positive = "X1") 
+stacked_perf <- data.frame(Accuracy = conf.stack$overall[1]*100, 
+                           Sensitivity = conf.stack$byClass[1]*100,
+                           AUC = pROC::auc(roc_stacked) * 100)
+row.names(stacked_perf) <- "Stacked Logistic Regression"
+stacked_perf
+```
+
+It can be seen that the stacked model does not affect the performance of the best performing model (Random Forest). Hence, in our case, we will not be using a stacked model.
