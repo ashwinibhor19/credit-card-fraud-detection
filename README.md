@@ -1,2 +1,4 @@
 # credit-card-fraud-detection
- DA5030 Data Mining Machine Learning
+ Data Mining Machine Learning Project
+ 
+ Dataset: https://www.kaggle.com/mlg-ulb/creditcardfraud
